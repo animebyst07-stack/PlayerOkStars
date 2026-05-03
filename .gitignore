@@ -1,0 +1,8 @@
+.env
+seen_lots.json
+config.json
+__pycache__/
+*.pyc
+*.pyo
+bot.log
+*.log
