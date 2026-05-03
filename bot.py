@@ -398,15 +398,20 @@ def format_lot_message(lot: dict) -> str:
 async def monitor_loop(app: Application):
     """Основной цикл мониторинга."""
     global seen_lots
-    logger.info("Фоновый мониторинг запущен")
+    logger.info("Фоновый мониторинг запущен (ожидает /monitor on)")
+    _idle_ticks = 0
 
     async with httpx.AsyncClient(follow_redirects=True, verify=True) as client:
         while True:
             try:
                 cfg = load_config()
                 if not cfg.get("enabled", False):
+                    _idle_ticks += 1
+                    if _idle_ticks == 1 or _idle_ticks % 120 == 0:
+                        logger.info("Мониторинг выключен — жду /monitor on ...")
                     await asyncio.sleep(5)
                     continue
+                _idle_ticks = 0
 
                 interval = cfg.get("interval", 30)
                 filters_cfg = cfg.get("filters", {})
@@ -898,8 +903,27 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════
 
 async def post_init(app: Application):
-    asyncio.create_task(monitor_loop(app))
-    logger.info("Бот запущен. Для старта мониторинга напиши /monitor on")
+    global monitor_task
+    cfg = load_config()
+    status = "ВКЛЮЧЁН" if cfg.get("enabled") else "ВЫКЛЮЧЕН"
+    logger.info(
+        "Бот запущен | Мониторинг: %s | Интервал: %s сек | /monitor on — чтобы включить",
+        status, cfg.get("interval", 30)
+    )
+    monitor_task = asyncio.create_task(monitor_loop(app))
+
+
+async def post_shutdown(app: Application):
+    """Корректная остановка фонового мониторинга при выходе."""
+    global monitor_task
+    if monitor_task and not monitor_task.done():
+        logger.info("Останавливаю фоновый мониторинг...")
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
+    logger.info("Бот остановлен. Пока!")
 
 
 def main():
@@ -916,6 +940,7 @@ def main():
         Application.builder()
         .token(bot_token)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 
