@@ -9,8 +9,7 @@ import sys
 from pathlib import Path
 
 import httpx
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import Bot
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO, datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
@@ -156,7 +155,7 @@ def format_lot_message(lot):
     url = f"https://playerok.com/products/{slug}"
     return "\n".join([f"⭐ *Новый лот: {stars_count} Stars*", "", f"💰 Цена: *{price} ₽* (без комиссии: {raw_price} ₽)", f"👤 Продавец: `{seller}`", f"📦 Доставка: {obtaining or 'не указана'}", "", f"🔗 [Открыть лот]({url})", f"🆔 ID: `{lot_id}`"])
 
-async def monitor_loop(app):
+async def monitor_loop(bot):
     async with httpx.AsyncClient(follow_redirects=True, verify=True) as client:
         while True:
             cfg = load_config()
@@ -173,7 +172,7 @@ async def monitor_loop(app):
                 save_seen(seen_lots)
                 msg = format_lot_message(lot)
                 for chat_id in chat_ids:
-                    await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown", disable_web_page_preview=False)
+                    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown", disable_web_page_preview=False)
             interval = cfg.get("interval", 30)
             await asyncio.sleep(max(interval + random.uniform(-(interval * 0.2), interval * 0.2), 5))
 
@@ -181,66 +180,13 @@ def is_admin(user_id):
     admins = load_config().get("admin_ids", [])
     return not admins or user_id in admins
 
-async def cmd_start(update, context):
-    cfg = load_config()
-    if not cfg.get("admin_ids"):
-        cfg["admin_ids"] = [update.effective_user.id]
-        save_config(cfg)
-    await update.message.reply_text("PlayerOk Stars Bot ready. Use /help")
-
-async def cmd_getchatid(update, context):
-    cid = str(update.effective_chat.id)
-    add_notify_chat_id(cid)
-    await update.message.reply_text(f"Chat ID: `{cid}`", parse_mode="Markdown")
-
-async def cmd_chatids(update, context):
-    await update.message.reply_text("\n".join(get_notify_chat_ids()) or "empty")
-
-async def cmd_monitor(update, context):
-    cfg = load_config()
-    cfg["enabled"] = (context.args[:1] == ["on"])
-    save_config(cfg)
-    await update.message.reply_text("on" if cfg["enabled"] else "off")
-
-async def cmd_test(update, context):
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        lots = await fetch_lots(client, load_config().get("filters", {}))
-    await update.message.reply_text(format_lot_message(lots[0]) if lots else "no lots")
-
-async def cmd_status(update, context):
-    cfg = load_config()
-    await update.message.reply_text(f"enabled={cfg.get('enabled', False)}\ninterval={cfg.get('interval', 30)}\nchat_ids={get_notify_chat_ids()}")
-
-async def cmd_help(update, context):
-    await update.message.reply_text("/start /status /monitor on|off /getchatid /chatids /test")
-
-async def callback_handler(update, context):
-    q = update.callback_query
-    await q.answer()
-    if q.data.startswith("addchat_"):
-        add_notify_chat_id(q.data.split("_", 1)[1])
-        await q.edit_message_text("added")
-
-async def message_handler(update, context):
-    pass
-
 def main():
     env = setup_wizard()
     token = env.get("BOT_TOKEN", "")
     if not token:
         sys.exit(1)
-    app = Application.builder().token(token).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("monitor", cmd_monitor))
-    app.add_handler(CommandHandler("getchatid", cmd_getchatid))
-    app.add_handler(CommandHandler("chatids", cmd_chatids))
-    app.add_handler(CommandHandler("test", cmd_test))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    asyncio.get_event_loop().create_task(monitor_loop(app))
-    app.run_polling(drop_pending_updates=True)
+    bot = Bot(token=token)
+    asyncio.run(monitor_loop(bot))
 
 if __name__ == "__main__":
     main()
