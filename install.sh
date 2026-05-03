@@ -35,10 +35,11 @@ fi
 echo "[5/6] Создание скрипта запуска..."
 cat > run.sh << 'RUNEOF'
 #!/bin/bash
-# Загрузка .env
+set -e
+chmod +x playerok.py 2>/dev/null || true
+chmod +x run.sh 2>/dev/null || true
 export $(grep -v '^#' .env | xargs)
-# Запуск бота
-python bot.py
+python playerok.py
 RUNEOF
 chmod +x run.sh
 
@@ -49,7 +50,7 @@ cat > ~/.termux/boot/playerok-stars.sh << BOOTEOF
 #!/data/data/com.termux/files/usr/bin/bash
 cd $(pwd)
 export \$(grep -v '^#' .env | xargs)
-python bot.py >> bot.log 2>&1 &
+python playerok.py >> bot.log 2>&1 &
 BOOTEOF
 chmod +x ~/.termux/boot/playerok-stars.sh
 
@@ -60,8 +61,8 @@ echo "=========================================="
 echo ""
 echo "Следующие шаги:"
 echo "1. Отредактируй .env: nano .env"
-echo "2. Запусти бота: ./run.sh"
-echo "   или: bash run.sh"
+echo "2. Запусти бота: bash run.sh"
+echo "   или: chmod +x run.sh && ./run.sh"
 echo ""
 echo "Автозапуск настроен через Termux:Boot"
 echo "Установи Termux:Boot из F-Droid для автозапуска при старте телефона."
