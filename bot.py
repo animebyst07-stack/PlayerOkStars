@@ -912,18 +912,20 @@ async def post_init(app: Application):
     )
     monitor_task = asyncio.create_task(monitor_loop(app))
 
-
-async def post_shutdown(app: Application):
-    """Корректная остановка фонового мониторинга при выходе."""
-    global monitor_task
-    if monitor_task and not monitor_task.done():
-        logger.info("Останавливаю фоновый мониторинг...")
-        monitor_task.cancel()
-        try:
-            await monitor_task
-        except asyncio.CancelledError:
-            pass
-    logger.info("Бот остановлен. Пока!")
+    # Патчим shutdown для корректной отмены monitor_task
+    _original_shutdown = app.shutdown
+    async def _patched_shutdown() -> None:
+        global monitor_task
+        if monitor_task and not monitor_task.done():
+            logger.info("Останавливаю фоновый мониторинг...")
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Бот остановлен. Пока!")
+        await _original_shutdown()
+    app.shutdown = _patched_shutdown  # type: ignore[method-assign]
 
 
 def main():
@@ -940,7 +942,6 @@ def main():
         Application.builder()
         .token(bot_token)
         .post_init(post_init)
-        .post_shutdown(post_shutdown)
         .build()
     )
 
