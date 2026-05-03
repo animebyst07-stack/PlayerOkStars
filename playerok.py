@@ -339,7 +339,7 @@ async def main():
     p(f"  {lbl}Chat    {val}{', '.join(chat_ids) if chat_ids else 'not set'}{R}")
     p(f"  {lbl}Stars   {val}{', '.join(map(str, stars_f)) if stars_f else 'all'}{R}")
     p(f"  {lbl}Price   {val}{f'max {price_f} RUB' if price_f else 'no limit'}{R}")
-    p(f"  {lbl}Interval{val}{cfg.get('interval', 30)}s{R}")
+    p(f"  {lbl}Interval{val}  {cfg.get('interval', 30)}s{R}")
     p()
     p(LN)
     p(f"  {DIM}Press Ctrl+C to stop{R}")
