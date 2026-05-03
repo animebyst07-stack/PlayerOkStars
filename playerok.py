@@ -224,15 +224,12 @@ async def callback_handler(update, context):
 async def message_handler(update, context):
     pass
 
-async def post_init(app):
-    asyncio.create_task(monitor_loop(app))
-
 def main():
     env = setup_wizard()
     token = env.get("BOT_TOKEN", "")
     if not token:
         sys.exit(1)
-    app = Application.builder().token(token).post_init(post_init).build()
+    app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
@@ -242,6 +239,7 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    asyncio.get_event_loop().create_task(monitor_loop(app))
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
