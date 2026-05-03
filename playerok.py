@@ -153,7 +153,7 @@ def get_headers() -> dict:
 # ── PlayerOk API ─────────────────────────────────────────────────────────
 async def fetch_lots(client: httpx.AsyncClient, filters_cfg: dict) -> list:
     variables: dict = {
-        "pagination": {"first": 40, "after": None},
+        "pagination": {"first": 40},
         "filters": {"gameSlug": "telegram", "categorySlug": "stars"},
         "sort": "CREATED_AT_DESC",
     }
@@ -187,7 +187,8 @@ async def fetch_lots(client: httpx.AsyncClient, filters_cfg: dict) -> list:
         edges = data.get("data", {}).get("items", {}).get("edges", [])
         return [e["node"] for e in edges if e.get("node")]
     except httpx.HTTPStatusError as e:
-        log_err(f"HTTP {e.response.status_code}")
+        body = e.response.text[:400].replace("\n", " ")
+        log_err(f"HTTP {e.response.status_code}: {body}")
         return []
     except Exception as e:
         log_err(f"Fetch: {e}")
