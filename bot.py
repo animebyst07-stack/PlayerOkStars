@@ -10,7 +10,7 @@ import logging
 import os
 import random
 import re
-import time
+import sys
 from pathlib import Path
 
 import httpx
@@ -32,23 +32,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─────────────────── Конфиг ───────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-NOTIFY_CHAT_IDS_RAW = os.environ.get("NOTIFY_CHAT_IDS", "")
-NOTIFY_CHAT_IDS = [c.strip() for c in NOTIFY_CHAT_IDS_RAW.split(",") if c.strip()]
-
+# ─────────────────── Пути к файлам ───────────────────
+ENV_FILE = Path(".env")
 CONFIG_FILE = Path("config.json")
 SEEN_FILE = Path("seen_lots.json")
 
 PLAYEROK_GRAPHQL = "https://playerok.com/graphql"
-
-# Персистированный хэш запроса items
 ITEMS_HASH = "63eefcfd813442882ad846360d925279bc376e8bc85a577ebefbee0f9c78b557"
 
-# Допустимые количества звёзд на PlayerOk
 STAR_AMOUNTS = [50, 75, 100, 150, 200, 250, 300, 350, 400, 500, 750, 1000, 1500, 2000, 2500, 3000, 5000]
 
-# Ротация User-Agent
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -58,22 +51,163 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.4; rv:125.0) Gecko/20100101 Firefox/125.0",
 ]
 
-# ─────────────────── Дефолтный конфиг ───────────────────
 DEFAULT_CONFIG = {
     "enabled": False,
     "interval": 30,
     "filters": {
-        "star_amounts": [],        # пустой = все количества
-        "max_price": None,         # макс цена в рублях
-        "username_filter": None,   # фильтр по username продавца
-        "by_username_only": False, # только лоты с доставкой по username
-        "by_gift_only": False,     # только лоты с доставкой Подарком
+        "star_amounts": [],
+        "max_price": None,
+        "username_filter": None,
+        "by_username_only": False,
+        "by_gift_only": False,
     },
     "admin_ids": [],
 }
 
 
-# ─────────────────── Хранилище ───────────────────
+# ══════════════════════════════════════════════════════
+#   МАСТЕР ПЕРВОГО ЗАПУСКА
+# ══════════════════════════════════════════════════════
+
+def load_env_file() -> dict:
+    """Читает .env файл и возвращает словарь ключ=значение."""
+    result = {}
+    if not ENV_FILE.exists():
+        return result
+    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        result[key.strip()] = val.strip()
+    return result
+
+
+def save_env_file(data: dict):
+    """Сохраняет словарь в .env файл."""
+    lines = []
+    for key, val in data.items():
+        lines.append(f"{key}={val}")
+    ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("Данные сохранены в .env")
+
+
+def validate_bot_token(token: str) -> bool:
+    """Проверяет формат токена (цифры:буквы_цифры)."""
+    return bool(re.match(r"^\d+:[A-Za-z0-9_-]{35,}$", token.strip()))
+
+
+async def check_token_online(token: str) -> tuple[bool, str]:
+    """Проверяет токен через Telegram API."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+            data = resp.json()
+            if data.get("ok"):
+                bot_name = data["result"].get("username", "")
+                return True, bot_name
+            return False, data.get("description", "Ошибка")
+    except Exception as e:
+        return False, str(e)
+
+
+def setup_wizard():
+    """
+    Мастер первого запуска.
+    Запускается если BOT_TOKEN или NOTIFY_CHAT_IDS не заданы.
+    Спрашивает данные в терминале и сохраняет в .env
+    """
+    env = load_env_file()
+
+    # Перезаписываем из переменных окружения (приоритет у реальных env vars)
+    for key in ("BOT_TOKEN", "NOTIFY_CHAT_IDS"):
+        if os.environ.get(key):
+            env[key] = os.environ[key]
+
+    needs_setup = not env.get("BOT_TOKEN") or not env.get("NOTIFY_CHAT_IDS")
+    if not needs_setup:
+        return env
+
+    print()
+    print("╔══════════════════════════════════════════════╗")
+    print("║     PlayerOk Stars Bot — Первый запуск       ║")
+    print("╚══════════════════════════════════════════════╝")
+    print()
+
+    # ── BOT_TOKEN ──────────────────────────────────────
+    if not env.get("BOT_TOKEN"):
+        print("📌 Шаг 1: Токен Telegram бота")
+        print("   Создай бота через @BotFather в Telegram.")
+        print("   Скопируй токен вида: 1234567890:ABCDefgh...")
+        print()
+
+        while True:
+            token = input("   Вставь токен бота: ").strip()
+            if not token:
+                print("   ❌ Токен не может быть пустым. Попробуй снова.")
+                continue
+            if not validate_bot_token(token):
+                print("   ❌ Неверный формат. Токен должен быть вида: 1234567890:ABCDef...")
+                continue
+
+            print("   ⏳ Проверяю токен онлайн...")
+            ok, info = asyncio.run(check_token_online(token))
+            if ok:
+                print(f"   ✅ Токен валиден! Бот: @{info}")
+                env["BOT_TOKEN"] = token
+                break
+            else:
+                print(f"   ❌ Telegram отклонил токен: {info}")
+                retry = input("   Попробовать другой токен? (да/нет): ").strip().lower()
+                if retry not in ("да", "д", "yes", "y"):
+                    print("   Выход.")
+                    sys.exit(1)
+        print()
+
+    # ── NOTIFY_CHAT_IDS ────────────────────────────────
+    if not env.get("NOTIFY_CHAT_IDS"):
+        print("📌 Шаг 2: Chat ID для уведомлений")
+        print()
+        print("   Как узнать свой Chat ID:")
+        print("   1. Напиши боту @userinfobot в Telegram")
+        print("   2. Он пришлёт твой ID (число, например: 123456789)")
+        print()
+        print("   Для группы/канала:")
+        print("   1. Добавь своего бота как администратора")
+        print("   2. Отправь любое сообщение в чат")
+        print("   3. Запусти бота командой /start — он покажет ID через /getchatid")
+        print()
+        print("   💡 Можно указать несколько ID через запятую:")
+        print("      123456789,-1001234567890")
+        print()
+        print("   Или оставь пустым и используй /getchatid после запуска бота.")
+        print()
+
+        chat_ids_raw = input("   Введи Chat ID (или Enter чтобы пропустить): ").strip()
+        if chat_ids_raw:
+            env["NOTIFY_CHAT_IDS"] = chat_ids_raw
+            print(f"   ✅ Chat ID сохранены: {chat_ids_raw}")
+        else:
+            env["NOTIFY_CHAT_IDS"] = ""
+            print("   ⚠️  Chat ID не указаны.")
+            print("   После запуска бота напиши ему /getchatid чтобы получить свой ID.")
+        print()
+
+    # ── Сохраняем ──────────────────────────────────────
+    save_env_file(env)
+
+    print("╔══════════════════════════════════════════════╗")
+    print("║          ✅ Настройка завершена!              ║")
+    print("╚══════════════════════════════════════════════╝")
+    print()
+
+    return env
+
+
+# ══════════════════════════════════════════════════════
+#   ХРАНИЛИЩЕ
+# ══════════════════════════════════════════════════════
+
 def load_config() -> dict:
     if CONFIG_FILE.exists():
         try:
@@ -100,13 +234,38 @@ def save_seen(seen: set):
     SEEN_FILE.write_text(json.dumps(list(seen), ensure_ascii=False), encoding="utf-8")
 
 
-# ─────────────────── Глобальное состояние ───────────────────
-config = load_config()
+def get_notify_chat_ids() -> list[str]:
+    """Читает актуальный список chat_id из .env каждый раз."""
+    env = load_env_file()
+    raw = os.environ.get("NOTIFY_CHAT_IDS") or env.get("NOTIFY_CHAT_IDS", "")
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+def add_notify_chat_id(new_id: str):
+    """Добавляет новый chat_id в .env если его там нет."""
+    env = load_env_file()
+    raw = env.get("NOTIFY_CHAT_IDS", "")
+    ids = [c.strip() for c in raw.split(",") if c.strip()]
+    if new_id not in ids:
+        ids.append(new_id)
+        env["NOTIFY_CHAT_IDS"] = ",".join(ids)
+        save_env_file(env)
+        return True
+    return False
+
+
+# ══════════════════════════════════════════════════════
+#   ГЛОБАЛЬНОЕ СОСТОЯНИЕ
+# ══════════════════════════════════════════════════════
+
 seen_lots: set = load_seen()
 monitor_task = None
 
 
-# ─────────────────── PlayerOk API ───────────────────
+# ══════════════════════════════════════════════════════
+#   PLAYEROK API
+# ══════════════════════════════════════════════════════
+
 def get_headers() -> dict:
     return {
         "User-Agent": random.choice(USER_AGENTS),
@@ -121,11 +280,10 @@ def get_headers() -> dict:
     }
 
 
-async def fetch_lots(client: httpx.AsyncClient, page: int = 1, filters_cfg: dict = None) -> list[dict]:
+async def fetch_lots(client: httpx.AsyncClient, filters_cfg: dict = None) -> list[dict]:
     """Получить список лотов с playerok.com через GraphQL."""
     filters_cfg = filters_cfg or {}
 
-    # Переменные для GraphQL запроса items
     variables = {
         "pagination": {"first": 40, "after": None},
         "filters": {
@@ -135,20 +293,16 @@ async def fetch_lots(client: httpx.AsyncClient, page: int = 1, filters_cfg: dict
         "sort": "CREATED_AT_DESC",
     }
 
-    # Фильтр по количеству звёзд (через dataFields)
     star_amounts = filters_cfg.get("star_amounts", [])
     if star_amounts:
-        # PlayerOk фильтрует по dataFieldsFilter
         variables["filters"]["dataFieldsFilter"] = [
             {"fieldId": "count", "value": str(amt)} for amt in star_amounts
         ]
 
-    # Фильтр по цене
     max_price = filters_cfg.get("max_price")
     if max_price:
         variables["filters"]["priceRange"] = {"max": float(max_price)}
 
-    # Фильтр по типу доставки
     by_username_only = filters_cfg.get("by_username_only", False)
     by_gift_only = filters_cfg.get("by_gift_only", False)
     if by_username_only:
@@ -181,12 +335,11 @@ async def fetch_lots(client: httpx.AsyncClient, page: int = 1, filters_cfg: dict
             logger.warning("GraphQL errors: %s", data["errors"])
             return []
 
-        items_data = data.get("data", {}).get("items", {})
-        edges = items_data.get("edges", [])
-        return [edge["node"] for edge in edges if edge.get("node")]
+        edges = data.get("data", {}).get("items", {}).get("edges", [])
+        return [e["node"] for e in edges if e.get("node")]
 
     except httpx.HTTPStatusError as e:
-        logger.error("HTTP error %s: %s", e.response.status_code, e.response.text[:200])
+        logger.error("HTTP %s: %s", e.response.status_code, e.response.text[:200])
         return []
     except Exception as e:
         logger.error("Fetch error: %s", e)
@@ -194,12 +347,9 @@ async def fetch_lots(client: httpx.AsyncClient, page: int = 1, filters_cfg: dict
 
 
 def apply_local_filters(lots: list[dict], filters_cfg: dict) -> list[dict]:
-    """Дополнительная локальная фильтрация лотов."""
     result = []
-    username_filter = filters_cfg.get("username_filter", "").lower() if filters_cfg.get("username_filter") else None
-
+    username_filter = (filters_cfg.get("username_filter") or "").lower() or None
     for lot in lots:
-        # Фильтр по username продавца
         if username_filter:
             seller = (lot.get("user") or {}).get("username", "").lower()
             if username_filter not in seller:
@@ -209,56 +359,48 @@ def apply_local_filters(lots: list[dict], filters_cfg: dict) -> list[dict]:
 
 
 def format_lot_message(lot: dict) -> str:
-    """Форматировать сообщение о лоте."""
     lot_id = lot.get("id", "?")
     slug = lot.get("slug", lot_id)
     name = lot.get("name", "Telegram Stars")
     price = lot.get("price", "?")
     raw_price = lot.get("rawPrice", price)
     seller = (lot.get("user") or {}).get("username", "Неизвестен")
+    obtaining = (lot.get("obtainingType") or {}).get("name", "") or \
+                (lot.get("category") or {}).get("name", "")
 
-    # Тип доставки
-    obtaining = (lot.get("obtainingType") or {}).get("name", "")
-    if not obtaining:
-        category = (lot.get("category") or {})
-        obtaining = category.get("name", "")
-
-    # Количество звёзд из dataFields
     stars_count = ""
     for field in lot.get("dataFields") or []:
         if field.get("id") in ("count", "stars_count", "amount"):
             stars_count = field.get("value", "")
             break
     if not stars_count:
-        stars_count = re.search(r"\d+", name)
-        stars_count = stars_count.group(0) if stars_count else "?"
+        m = re.search(r"\d+", name)
+        stars_count = m.group(0) if m else "?"
 
     url = f"https://playerok.com/products/{slug}"
 
-    lines = [
-        f"⭐ **Новый лот: {stars_count} Stars**",
+    return "\n".join([
+        f"⭐ *Новый лот: {stars_count} Stars*",
         f"",
-        f"💰 Цена: **{price} ₽** (без комиссии: {raw_price} ₽)",
+        f"💰 Цена: *{price} ₽* (без комиссии: {raw_price} ₽)",
         f"👤 Продавец: `{seller}`",
         f"📦 Доставка: {obtaining or 'не указана'}",
         f"",
         f"🔗 [Открыть лот]({url})",
         f"🆔 ID: `{lot_id}`",
-    ]
-    return "\n".join(lines)
+    ])
 
 
-# ─────────────────── Мониторинг ───────────────────
+# ══════════════════════════════════════════════════════
+#   МОНИТОРИНГ
+# ══════════════════════════════════════════════════════
+
 async def monitor_loop(app: Application):
     """Основной цикл мониторинга."""
-    global seen_lots, config
+    global seen_lots
+    logger.info("Фоновый мониторинг запущен")
 
-    logger.info("Мониторинг запущен")
-
-    async with httpx.AsyncClient(
-        follow_redirects=True,
-        verify=True,
-    ) as client:
+    async with httpx.AsyncClient(follow_redirects=True, verify=True) as client:
         while True:
             try:
                 cfg = load_config()
@@ -273,7 +415,9 @@ async def monitor_loop(app: Application):
                 lots = await fetch_lots(client, filters_cfg=filters_cfg)
                 lots = apply_local_filters(lots, filters_cfg)
 
+                chat_ids = get_notify_chat_ids()
                 new_count = 0
+
                 for lot in lots:
                     lot_id = str(lot.get("id", ""))
                     if not lot_id or lot_id in seen_lots:
@@ -284,7 +428,7 @@ async def monitor_loop(app: Application):
                     new_count += 1
 
                     msg = format_lot_message(lot)
-                    for chat_id in NOTIFY_CHAT_IDS:
+                    for chat_id in chat_ids:
                         try:
                             await app.bot.send_message(
                                 chat_id=chat_id,
@@ -298,22 +442,23 @@ async def monitor_loop(app: Application):
                 if new_count:
                     logger.info("Найдено %d новых лотов", new_count)
                 else:
-                    logger.info("Новых лотов нет (всего лотов: %d)", len(lots))
+                    logger.info("Новых лотов нет (всего: %d)", len(lots))
 
-                # Случайная задержка ±20% для анти-бан
                 jitter = interval * 0.2
-                sleep_time = interval + random.uniform(-jitter, jitter)
-                await asyncio.sleep(max(sleep_time, 5))
+                await asyncio.sleep(max(interval + random.uniform(-jitter, jitter), 5))
 
             except asyncio.CancelledError:
                 logger.info("Мониторинг остановлен")
                 break
             except Exception as e:
-                logger.error("Ошибка в цикле мониторинга: %s", e)
+                logger.error("Ошибка в цикле: %s", e)
                 await asyncio.sleep(10)
 
 
-# ─────────────────── Telegram команды ───────────────────
+# ══════════════════════════════════════════════════════
+#   TELEGRAM КОМАНДЫ
+# ══════════════════════════════════════════════════════
+
 def is_admin(user_id: int) -> bool:
     cfg = load_config()
     admins = cfg.get("admin_ids", [])
@@ -324,14 +469,25 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     cfg = load_config()
 
-    # Первый запуск — добавляем как admin
+    # Первый /start — автоматически делаем этого пользователя admin
     if not cfg.get("admin_ids"):
         cfg["admin_ids"] = [user_id]
         save_config(cfg)
+        logger.info("Новый admin: %d", user_id)
+
+    # Проверяем есть ли chat_ids — если нет, предлагаем добавить
+    chat_ids = get_notify_chat_ids()
+    chat_warn = ""
+    if not chat_ids:
+        chat_warn = (
+            "\n⚠️ *Chat ID не настроены!*\n"
+            "Нажми /getchatid — бот автоматически добавит этот чат для уведомлений.\n"
+        )
 
     text = (
         "👋 *PlayerOk Stars Monitor*\n\n"
-        "Слежу за лотами Telegram Stars на playerok.com\n\n"
+        "Слежу за лотами Telegram Stars на playerok.com\n"
+        f"{chat_warn}\n"
         "📋 *Команды:*\n"
         "/status — текущий статус\n"
         "/monitor on|off — вкл/выкл мониторинг\n"
@@ -340,10 +496,77 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/filters — показать фильтры\n"
         "/clearfilters — сбросить фильтры\n"
         "/clearseen — очистить историю лотов\n"
+        "/getchatid — добавить этот чат в уведомления\n"
+        "/chatids — список чатов для уведомлений\n"
         "/test — тестовый запрос к PlayerOk\n"
         "/help — помощь"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_getchatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает chat_id текущего чата и предлагает добавить его в уведомления."""
+    chat = update.effective_chat
+    user = update.effective_user
+    chat_id = str(chat.id)
+
+    chat_type_map = {
+        "private": "личный чат",
+        "group": "группа",
+        "supergroup": "супергруппа",
+        "channel": "канал",
+    }
+    chat_type = chat_type_map.get(chat.type, chat.type)
+    chat_title = chat.title or f"@{user.username or user.first_name}"
+
+    existing = get_notify_chat_ids()
+    already_added = chat_id in existing
+
+    keyboard = []
+    if not already_added:
+        keyboard.append([
+            InlineKeyboardButton("✅ Добавить этот чат в уведомления", callback_data=f"addchat_{chat_id}")
+        ])
+
+    text = (
+        f"🆔 *Chat ID этого чата:*\n"
+        f"`{chat_id}`\n\n"
+        f"📋 Тип: {chat_type}\n"
+        f"📝 Название: {chat_title}\n\n"
+    )
+
+    if already_added:
+        text += "✅ *Этот чат уже добавлен* в список уведомлений."
+    else:
+        text += "Нажми кнопку ниже чтобы добавить этот чат для уведомлений:"
+
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
+    )
+
+
+async def cmd_chatids(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает список всех Chat ID для уведомлений."""
+    ids = get_notify_chat_ids()
+    if not ids:
+        await update.message.reply_text(
+            "⚠️ Нет ни одного Chat ID.\n"
+            "Используй /getchatid чтобы добавить текущий чат."
+        )
+        return
+
+    lines = ["📋 *Чаты для уведомлений:*\n"]
+    for i, cid in enumerate(ids, 1):
+        lines.append(f"{i}. `{cid}`")
+
+    keyboard = [[InlineKeyboardButton("🗑 Очистить список чатов", callback_data="clearchats")]]
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -351,9 +574,6 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     enabled = cfg.get("enabled", False)
     interval = cfg.get("interval", 30)
     f = cfg.get("filters", {})
-
-    status_icon = "🟢" if enabled else "🔴"
-    status_text = "ВКЛЮЧЁН" if enabled else "ВЫКЛЮЧЕН"
 
     star_amounts = f.get("star_amounts", [])
     stars_str = ", ".join(str(s) for s in star_amounts) if star_amounts else "все"
@@ -367,14 +587,21 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         delivery.append("подарком")
     delivery_str = ", ".join(delivery) if delivery else "все"
 
+    chat_ids = get_notify_chat_ids()
+    chats_str = ", ".join(f"`{c}`" for c in chat_ids) if chat_ids else "⚠️ не настроены"
+
+    status_icon = "🟢" if enabled else "🔴"
+    status_text = "ВКЛЮЧЁН" if enabled else "ВЫКЛЮЧЕН"
+
     text = (
         f"{status_icon} *Мониторинг: {status_text}*\n\n"
         f"⏱ Интервал: {interval} сек\n"
-        f"📊 Просмотрено лотов: {len(seen_lots)}\n\n"
+        f"📊 Просмотрено лотов: {len(seen_lots)}\n"
+        f"📣 Уведомления: {chats_str}\n\n"
         f"*Фильтры:*\n"
         f"⭐ Звёзды: {stars_str}\n"
         f"💰 Цена: {price_str}\n"
-        f"👤 Username: {f.get('username_filter') or 'не задан'}\n"
+        f"👤 Username продавца: {f.get('username_filter') or 'не задан'}\n"
         f"📦 Доставка: {delivery_str}\n"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -388,6 +615,14 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or args[0] not in ("on", "off"):
         await update.message.reply_text("Использование: /monitor on или /monitor off")
+        return
+
+    # Проверяем chat_ids перед включением
+    if args[0] == "on" and not get_notify_chat_ids():
+        await update.message.reply_text(
+            "⚠️ Не настроены Chat ID для уведомлений!\n"
+            "Сначала используй /getchatid чтобы добавить чат."
+        )
         return
 
     cfg = load_config()
@@ -421,7 +656,6 @@ async def cmd_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Интерактивное меню фильтров."""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Нет прав.")
         return
@@ -430,20 +664,18 @@ async def cmd_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⭐ Количество звёзд", callback_data="filter_stars")],
         [InlineKeyboardButton("💰 Макс. цена", callback_data="filter_price")],
         [InlineKeyboardButton("👤 По username продавца", callback_data="filter_username")],
-        [InlineKeyboardButton("📦 По username доставки", callback_data="filter_delivery_username")],
-        [InlineKeyboardButton("🎁 По доставке Подарком", callback_data="filter_delivery_gift")],
+        [InlineKeyboardButton("📦 Только доставка по username", callback_data="filter_delivery_username")],
+        [InlineKeyboardButton("🎁 Только доставка Подарком", callback_data="filter_delivery_gift")],
         [InlineKeyboardButton("🔄 Сбросить все фильтры", callback_data="filter_clear")],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
         "⚙️ *Настройка фильтров*\nВыбери что настроить:",
         parse_mode="Markdown",
-        reply_markup=reply_markup,
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
 async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать текущие фильтры."""
     await cmd_status(update, context)
 
 
@@ -468,76 +700,85 @@ async def cmd_clearseen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Тестовый запрос к PlayerOk."""
     await update.message.reply_text("🔍 Делаю тестовый запрос к PlayerOk...")
-
     cfg = load_config()
-    filters_cfg = cfg.get("filters", {})
-
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        lots = await fetch_lots(client, filters_cfg=filters_cfg)
+        lots = await fetch_lots(client, filters_cfg=cfg.get("filters", {}))
 
     if lots:
-        lot = lots[0]
-        msg = format_lot_message(lot)
+        msg = format_lot_message(lots[0])
         await update.message.reply_text(
-            f"✅ Получено {len(lots)} лотов. Первый:\n\n{msg}",
+            f"✅ Получено *{len(lots)}* лотов. Первый:\n\n{msg}",
             parse_mode="Markdown",
         )
     else:
         await update.message.reply_text(
             "⚠️ Лоты не найдены или PlayerOk заблокировал запрос.\n"
-            "Попробуй позже или проверь подключение."
+            "Попробуй позже или увеличь интервал."
         )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📖 *Справка PlayerOk Stars Monitor*\n\n"
-        "*Основные команды:*\n"
+        "*Основные:*\n"
         "/start — главное меню\n"
-        "/status — статус и текущие фильтры\n"
+        "/status — статус, фильтры, чаты\n"
         "/monitor on — запустить мониторинг\n"
-        "/monitor off — остановить мониторинг\n"
-        "/interval 60 — проверять каждые 60 сек\n\n"
+        "/monitor off — остановить\n"
+        "/interval 60 — интервал проверки (сек)\n\n"
+        "*Уведомления:*\n"
+        "/getchatid — получить ID этого чата и добавить его\n"
+        "/chatids — список чатов для уведомлений\n\n"
         "*Фильтры:*\n"
         "/filter — меню настройки фильтров\n"
         "/filters — показать текущие фильтры\n"
         "/clearfilters — сбросить все фильтры\n\n"
         "*Прочее:*\n"
-        "/clearseen — очистить историю лотов (найдёт снова)\n"
+        "/clearseen — очистить историю лотов\n"
         "/test — тестовый запрос к PlayerOk\n\n"
-        f"⭐ *Доступные количества звёзд:*\n"
+        f"⭐ *Количества звёзд на PlayerOk:*\n"
         f"{', '.join(str(x) for x in STAR_AMOUNTS)}"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
-# ─────────────────── Callback кнопок ───────────────────
+# ══════════════════════════════════════════════════════
+#   CALLBACK КНОПОК
+# ══════════════════════════════════════════════════════
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    if data == "filter_stars":
-        # Показываем кнопки для каждого количества звёзд
+    # ── Добавить чат в уведомления ──
+    if data.startswith("addchat_"):
+        new_id = data.split("_", 1)[1]
+        added = add_notify_chat_id(new_id)
+        if added:
+            await query.edit_message_text(
+                f"✅ Чат `{new_id}` добавлен в список уведомлений!\n\n"
+                f"Теперь можешь запустить мониторинг: /monitor on",
+                parse_mode="Markdown",
+            )
+        else:
+            await query.edit_message_text(f"ℹ️ Чат `{new_id}` уже был в списке.", parse_mode="Markdown")
+
+    # ── Очистить список чатов ──
+    elif data == "clearchats":
+        env = load_env_file()
+        env["NOTIFY_CHAT_IDS"] = ""
+        save_env_file(env)
+        await query.edit_message_text("✅ Список чатов для уведомлений очищен.")
+
+    # ── Фильтр по звёздам ──
+    elif data == "filter_stars":
         cfg = load_config()
         current = cfg.get("filters", {}).get("star_amounts", [])
-
-        keyboard = []
-        row = []
-        for i, amt in enumerate(STAR_AMOUNTS):
-            mark = "✅ " if amt in current else ""
-            row.append(InlineKeyboardButton(f"{mark}{amt}⭐", callback_data=f"toggle_stars_{amt}"))
-            if len(row) == 3:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
-        keyboard.append([InlineKeyboardButton("✔️ Готово", callback_data="filter_stars_done")])
-
+        keyboard = _build_stars_keyboard(current)
         await query.edit_message_text(
-            "⭐ Выбери нужные количества звёзд (можно несколько):\n(пусто = все)",
+            "⭐ Выбери количества звёзд (можно несколько):\nПусто = все",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
@@ -551,20 +792,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current.append(amt)
         cfg.setdefault("filters", {})["star_amounts"] = sorted(current)
         save_config(cfg)
-
-        # Обновить те же кнопки
-        keyboard = []
-        row = []
-        for i, a in enumerate(STAR_AMOUNTS):
-            mark = "✅ " if a in current else ""
-            row.append(InlineKeyboardButton(f"{mark}{a}⭐", callback_data=f"toggle_stars_{a}"))
-            if len(row) == 3:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
-        keyboard.append([InlineKeyboardButton("✔️ Готово", callback_data="filter_stars_done")])
-        await query.edit_message_reply_markup(InlineKeyboardMarkup(keyboard))
+        await query.edit_message_reply_markup(InlineKeyboardMarkup(_build_stars_keyboard(current)))
 
     elif data == "filter_stars_done":
         cfg = load_config()
@@ -572,39 +800,42 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stars_str = ", ".join(str(s) for s in current) if current else "все"
         await query.edit_message_text(f"✅ Фильтр по звёздам: {stars_str}")
 
+    # ── Цена ──
     elif data == "filter_price":
         context.user_data["awaiting"] = "price"
         await query.edit_message_text(
             "💰 Введи максимальную цену в рублях (например: 120):\n"
-            "Или отправь 0 чтобы убрать ограничение."
+            "Отправь 0 чтобы убрать ограничение."
         )
 
+    # ── Username продавца ──
     elif data == "filter_username":
         context.user_data["awaiting"] = "username"
         await query.edit_message_text(
             "👤 Введи username продавца для фильтрации:\n"
-            "Или отправь - чтобы убрать фильтр."
+            "Отправь - чтобы убрать фильтр."
         )
 
+    # ── Тип доставки ──
     elif data == "filter_delivery_username":
         cfg = load_config()
         cfg.setdefault("filters", {})
-        current = cfg["filters"].get("by_username_only", False)
-        cfg["filters"]["by_username_only"] = not current
+        new_val = not cfg["filters"].get("by_username_only", False)
+        cfg["filters"]["by_username_only"] = new_val
         cfg["filters"]["by_gift_only"] = False
         save_config(cfg)
-        state = "включён ✅" if not current else "выключен"
-        await query.edit_message_text(f"📦 Фильтр по username доставке: {state}")
+        state = "включён ✅" if new_val else "выключен"
+        await query.edit_message_text(f"📦 Фильтр 'только по username': {state}")
 
     elif data == "filter_delivery_gift":
         cfg = load_config()
         cfg.setdefault("filters", {})
-        current = cfg["filters"].get("by_gift_only", False)
-        cfg["filters"]["by_gift_only"] = not current
+        new_val = not cfg["filters"].get("by_gift_only", False)
+        cfg["filters"]["by_gift_only"] = new_val
         cfg["filters"]["by_username_only"] = False
         save_config(cfg)
-        state = "включён ✅" if not current else "выключен"
-        await query.edit_message_text(f"🎁 Фильтр по Подарку: {state}")
+        state = "включён ✅" if new_val else "выключен"
+        await query.edit_message_text(f"🎁 Фильтр 'только Подарком': {state}")
 
     elif data == "filter_clear":
         cfg = load_config()
@@ -613,8 +844,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ Все фильтры сброшены.")
 
 
+def _build_stars_keyboard(current: list) -> list:
+    keyboard = []
+    row = []
+    for i, amt in enumerate(STAR_AMOUNTS):
+        mark = "✅ " if amt in current else ""
+        row.append(InlineKeyboardButton(f"{mark}{amt}⭐", callback_data=f"toggle_stars_{amt}"))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("✔️ Готово", callback_data="filter_stars_done")])
+    return keyboard
+
+
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстового ввода для настройки фильтров."""
+    """Обработка текстового ввода при настройке фильтров."""
     awaiting = context.user_data.get("awaiting")
     if not awaiting:
         return
@@ -647,25 +893,28 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("awaiting", None)
 
 
-# ─────────────────── Запуск ───────────────────
+# ══════════════════════════════════════════════════════
+#   ЗАПУСК
+# ══════════════════════════════════════════════════════
+
 async def post_init(app: Application):
-    """Запуск мониторинга вместе с ботом."""
-    global monitor_task
-    monitor_task = asyncio.create_task(monitor_loop(app))
-    logger.info("Бот запущен. Мониторинг: %s", "активен" if config.get("enabled") else "ожидает /monitor on")
+    asyncio.create_task(monitor_loop(app))
+    logger.info("Бот запущен. Для старта мониторинга напиши /monitor on")
 
 
 def main():
-    if not BOT_TOKEN:
-        logger.error("BOT_TOKEN не задан! Укажи его в .env или переменных окружения.")
-        return
+    # ── Мастер настройки ──────────────────────────────
+    env = setup_wizard()
 
-    if not NOTIFY_CHAT_IDS:
-        logger.warning("NOTIFY_CHAT_IDS не задан. Уведомления будут отправлены только в личку с ботом.")
+    bot_token = env.get("BOT_TOKEN") or os.environ.get("BOT_TOKEN", "")
+    if not bot_token:
+        logger.error("BOT_TOKEN не задан. Запусти бота снова.")
+        sys.exit(1)
 
+    # ── Запуск бота ───────────────────────────────────
     app = (
         Application.builder()
-        .token(BOT_TOKEN)
+        .token(bot_token)
         .post_init(post_init)
         .build()
     )
@@ -678,6 +927,8 @@ def main():
     app.add_handler(CommandHandler("filters", cmd_filters))
     app.add_handler(CommandHandler("clearfilters", cmd_clearfilters))
     app.add_handler(CommandHandler("clearseen", cmd_clearseen))
+    app.add_handler(CommandHandler("getchatid", cmd_getchatid))
+    app.add_handler(CommandHandler("chatids", cmd_chatids))
     app.add_handler(CommandHandler("test", cmd_test))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(callback_handler))
